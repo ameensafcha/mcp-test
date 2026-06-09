@@ -60,7 +60,7 @@ git push -u origin main
 
 1. [claude.ai](https://claude.ai) pe Settings → Connectors jao
 2. "Add custom connector" pe click karo
-3. URL dalo: `https://mcp-test-server-xxxx.onrender.com/sse`
+3. URL dalo: `https://mcp-test-server-xxxx.onrender.com`
 4. Save karo
 
 Mobile app pe same connector automatically dikhega.
@@ -69,8 +69,7 @@ Mobile app pe same connector automatically dikhega.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/sse` | GET | SSE connection |
-| `/messages?sessionId=x` | POST | MCP messages |
+| `/mcp` | GET/POST | MCP Streamable HTTP endpoint |
 | `/` | GET | Server info |
 
 ## Tech Stack
