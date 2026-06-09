@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import crypto from "crypto";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 const app = express();
@@ -11,26 +10,8 @@ app.use(express.urlencoded({ extended: true }));
 
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
 
-const server = new McpServer({
-  name: "mcp-test-server",
-  version: "1.0.0",
-});
-
-server.tool("echo", { message: z.string() }, async ({ message }) => ({
-  content: [{ type: "text", text: `Echo: ${message}` }],
-}));
-
-server.tool("add", { a: z.number(), b: z.number() }, async ({ a, b }) => ({
-  content: [{ type: "text", text: `${a} + ${b} = ${a + b}` }],
-}));
-
-server.tool("greet", { name: z.string() }, async ({ name }) => ({
-  content: [{ type: "text", text: `Hello, ${name}! 👋` }],
-}));
-
-const clients = new Map<string, { name: string; redirect_uris: string[] }>();
-const codes = new Map<string, { clientId: string; redirectUri: string; codeChallenge: string; state: string }>();
-const tokens = new Map<string, { clientId: string; userId: string }>();
+const codes = new Map<string, { clientId: string; redirectUri: string; codeChallenge: string }>();
+const tokens = new Map<string, string>();
 
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
   res.json({
@@ -57,13 +38,11 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
 });
 
 app.post("/register", (req, res) => {
-  const { client_name, redirect_uris } = req.body;
   const clientId = crypto.randomUUID();
-  clients.set(clientId, { name: client_name, redirect_uris });
   res.json({
     client_id: clientId,
-    client_name,
-    redirect_uris,
+    client_name: req.body.client_name || "Claude",
+    redirect_uris: req.body.redirect_uris || ["https://claude.ai/api/mcp/auth_callback"],
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
     token_endpoint_auth_method: "none",
@@ -71,13 +50,12 @@ app.post("/register", (req, res) => {
 });
 
 app.get("/authorize", (req, res) => {
-  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope } = req.query;
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
   const code = crypto.randomBytes(16).toString("hex");
   codes.set(code, {
     clientId: client_id as string,
     redirectUri: redirect_uri as string,
     codeChallenge: code_challenge as string,
-    state: state as string,
   });
   const redirectUrl = new URL(redirect_uri as string);
   redirectUrl.searchParams.set("code", code);
@@ -86,7 +64,7 @@ app.get("/authorize", (req, res) => {
 });
 
 app.post("/token", (req, res) => {
-  const { grant_type, code, client_id, code_verifier, redirect_uri } = req.body;
+  const { grant_type, code, client_id, code_verifier } = req.body;
   if (grant_type !== "authorization_code") {
     res.status(400).json({ error: "unsupported_grant_type" });
     return;
@@ -96,38 +74,33 @@ app.post("/token", (req, res) => {
     res.status(400).json({ error: "invalid_grant" });
     return;
   }
-  const expectedChallenge = crypto.createHash("sha256").update(code_verifier).digest("base64url");
-  if (expectedChallenge !== codeData.codeChallenge) {
-    res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
-    return;
+  if (code_verifier) {
+    const expectedChallenge = crypto.createHash("sha256").update(code_verifier).digest("base64url");
+    if (expectedChallenge !== codeData.codeChallenge) {
+      res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
+      return;
+    }
   }
   codes.delete(code);
   const accessToken = crypto.randomBytes(32).toString("hex");
-  const refreshToken = crypto.randomBytes(32).toString("hex");
-  tokens.set(accessToken, { clientId: client_id, userId: "test-user" });
+  tokens.set(accessToken, client_id as string);
   res.json({
     access_token: accessToken,
     token_type: "Bearer",
     expires_in: 3600,
-    refresh_token: refreshToken,
+    refresh_token: crypto.randomBytes(32).toString("hex"),
     scope: "mcp:tools",
   });
 });
 
 app.post("/token/refresh", (req, res) => {
-  const { grant_type, refresh_token, client_id } = req.body;
-  if (grant_type !== "refresh_token") {
-    res.status(400).json({ error: "unsupported_grant_type" });
-    return;
-  }
-  const newAccessToken = crypto.randomBytes(32).toString("hex");
-  const newRefreshToken = crypto.randomBytes(32).toString("hex");
-  tokens.set(newAccessToken, { clientId: client_id, userId: "test-user" });
+  const accessToken = crypto.randomBytes(32).toString("hex");
+  tokens.set(accessToken, req.body.client_id as string);
   res.json({
-    access_token: newAccessToken,
+    access_token: accessToken,
     token_type: "Bearer",
     expires_in: 3600,
-    refresh_token: newRefreshToken,
+    refresh_token: crypto.randomBytes(32).toString("hex"),
     scope: "mcp:tools",
   });
 });
@@ -135,8 +108,7 @@ app.post("/token/refresh", (req, res) => {
 function verifyAuth(req: express.Request): boolean {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith("Bearer ")) return false;
-  const token = auth.slice(7);
-  return tokens.has(token);
+  return tokens.has(auth.slice(7));
 }
 
 app.all("/mcp", async (req, res) => {
@@ -150,7 +122,6 @@ app.all("/mcp", async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.flushHeaders();
     res.write("event: endpoint\ndata: /mcp\n\n");
-    req.on("close", () => {});
     return;
   }
   if (req.method === "POST") {
@@ -206,15 +177,8 @@ app.all("/mcp", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.json({
-    name: "MCP Test Server",
-    version: "1.0.0",
-    mcp_endpoint: `${BASE_URL}/mcp`,
-    tools: ["echo", "add", "greet"],
-  });
+  res.json({ name: "MCP Test Server", version: "1.0.0", mcp_endpoint: `${BASE_URL}/mcp` });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`MCP Test Server running on ${BASE_URL}`);
-});
+app.listen(PORT, () => console.log(`MCP Test Server running on ${BASE_URL}`));
